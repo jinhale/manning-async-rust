@@ -10,16 +10,46 @@ use async_trait::async_trait;
 use xactor::*;
 
 #[message(result = "String")]
-struct YahooMessage(String);
+#[derive(Debug, Default, Clone)]
+struct QuoteReponse {
+    pub symbol: String,
+    pub quotes: Vec<f64>,
+}
 
-struct YahooActor;
+#[message]
+#[derive(Debug, Clone)]
+struct QuoteRequest {   
+  pub symbol: &str,
+  pub from: &DateTime<Utc>,
+  pub to: &DateTime<Utc>,
+}
 
-impl Actor for YahooActor {}
+#[derive(Clap)]
+#[clap(
+    version = "88",
+    author = "Justin Hale",
+    about = "Derivation of a Manning LiveProject: async Rust"
+)]
+struct CliArguments {
+    #[Clap(short, long, default_value = "AAPL,MSFT,UBER,GOOG"))]
+    pub symbols: String,
+    #[clap(short, long)]
+    from: String,
+}
+
+struct QuoteDownloader;
 
 #[async_trait::async_trait]
-impl Handler<YahooMessage> for YahooActor {
-    async fn handle(&mut self, ctx: &mut Context<Self>, msg: YahooMessage) -> String {
-        msg.0
+impl Actor for QuoteDownloader {
+    async fn started(&mut self, ctx: &mut Context<Self>) -> Result<()> {
+        ctx.subscribe::<QuoteRequest>().await
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler<QuoteRequest> for QuoteDownloader {
+    async fn handle(&mut self, ctx: &mut Context<Self>, msg: QuoteRequest) {
+        handle_symbol_data(msg.0, msg.1, msg.2);
     }
 }
 
@@ -206,10 +236,15 @@ async fn handle_symbol_data(
     Some(closes)
 }
 
-#[async_std::main]
-async fn main() -> std::io::Result<()> {
-    let opts = Opts::parse();
-    let from: DateTime<Utc> = opts.from.parse().expect("Couldn't parse 'from' date");
+#[xactor::main]
+async fn main() -> Result<()> {
+    let opts: CliArguments = Opts::parse();
+    let from: DateTime<Utc> = opts.from::parse().expect("Correct the 'from' date! ");
+    let symbols: Vec<String> = opts.symbols.split(',').map(|s| s.to_owned()).collect();
+    
+    let _downloader = Supervisor::start(|| QuoteDownloader).await;
+    let _processor = Supervisor::start(|| QuoteProcessor).await;
+    
     let to = Utc::now();
 
     let mut interval = stream::interval(Duration::from_secs(30));
@@ -220,7 +255,7 @@ async fn main() -> std::io::Result<()> {
     while let Some(_) = interval.next().await {
         let queries: Vec<_> = symbols
             .iter()
-            .map(|&symbol| handle_symbol_data(&symbol, &from, &to))
+            .map(|&symbol| Broker::from_registry().await?.publish(YahooMessage(&symbol, &from, &to)))
             .collect();
         let _ = future::join_all(queries).await;
     }
